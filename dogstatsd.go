@@ -26,7 +26,19 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"strings"
+	"strconv"
+)
+
+var (
+	MetricSeparator = []byte{':'}
+	RateSeparator   = []byte("|@")
+	TagSeparator    = []byte("|#")
+	GaugeSpec       = []byte("|g")
+	CountSpec       = []byte("|c")
+	HistogramSpec   = []byte("|h")
+	TimerSpec       = []byte("|ms")
+	SetSpec         = []byte("|s")
+	Comma           = []byte{','}
 )
 
 // Client holds onto a connection and the other context necessary for every stasd packet.
@@ -55,26 +67,46 @@ func (c *Client) Close() error {
 }
 
 // send handles sampling and sends the message over UDP. It also adds global namespace prefixes and tags.
-func (c *Client) send(name string, value string, tags []string, rate float64) error {
+func (c *Client) send(b *bytes.Buffer, spec []byte, tags []string, rate float64) error {
+	if _, err := b.Write(spec); err != nil {
+		return err
+	}
+
 	if rate < 1 {
 		if rand.Float64() < rate {
-			value = fmt.Sprintf("%s|@%f", value, rate)
+			if _, err := b.Write(RateSeparator); err != nil {
+				return err
+			}
+			/*
+				bs := b.Bytes()
+				bs = strconv.AppendFloat(bs, rate, 'f', -1, 64)
+				b = bytes.NewBuffer(bs)
+			*/
+			b.WriteString(strconv.FormatFloat(rate, 'f', -1, 64))
 		} else {
 			return nil
 		}
 	}
 
-	if c.Namespace != "" {
-		name = fmt.Sprintf("%s%s", c.Namespace, name)
-	}
-
 	tags = append(c.Tags, tags...)
 	if len(tags) > 0 {
-		value = fmt.Sprintf("%s|#%s", value, strings.Join(tags, ","))
+		if _, err := b.Write(TagSeparator); err != nil {
+			return err
+		}
+		l := len(tags) - 1
+		for i, t := range tags {
+			if _, err := b.WriteString(t); err != nil {
+				return err
+			}
+			if i != l {
+				if _, err := b.Write(Comma); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
-	data := fmt.Sprintf("%s:%s", name, value)
-	_, err := c.conn.Write([]byte(data))
+	_, err := c.conn.Write(b.Bytes())
 	return err
 }
 
@@ -94,32 +126,76 @@ func (c *Client) Event(title string, text string, tags []string) error {
 	return err
 }
 
+func (c *Client) start(b *bytes.Buffer, name string) error {
+	var err error
+	if _, err = b.WriteString(c.Namespace); err != nil {
+		return err
+	}
+	if _, err = b.WriteString(name); err != nil {
+		return err
+	}
+	if _, err = b.Write(MetricSeparator); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Gauge measures the value of a metric at a particular time
 func (c *Client) Gauge(name string, value float64, tags []string, rate float64) error {
-	stat := fmt.Sprintf("%f|g", value)
-	return c.send(name, stat, tags, rate)
+	var b bytes.Buffer
+	if err := c.start(&b, name); err != nil {
+		return err
+	}
+	if _, err := b.WriteString(strconv.FormatFloat(value, 'f', -1, 64)); err != nil {
+		return err
+	}
+	return c.send(&b, GaugeSpec, tags, rate)
 }
 
 // Count tracks how many times something happened per second
 func (c *Client) Count(name string, value int64, tags []string, rate float64) error {
-	stat := fmt.Sprintf("%d|c", value)
-	return c.send(name, stat, tags, rate)
+	var b bytes.Buffer
+	if err := c.start(&b, name); err != nil {
+		return err
+	}
+	if _, err := b.WriteString(strconv.FormatInt(value, 10)); err != nil {
+		return err
+	}
+	return c.send(&b, CountSpec, tags, rate)
 }
 
 // Histogram tracks the statistical distribution of a set of values
 func (c *Client) Histogram(name string, value float64, tags []string, rate float64) error {
-	stat := fmt.Sprintf("%f|h", value)
-	return c.send(name, stat, tags, rate)
+	var b bytes.Buffer
+	if err := c.start(&b, name); err != nil {
+		return err
+	}
+	if _, err := b.WriteString(strconv.FormatFloat(value, 'f', -1, 64)); err != nil {
+		return err
+	}
+	return c.send(&b, HistogramSpec, tags, rate)
 }
 
 // Timer tracks the statistical distribution of a set of durations
 func (c *Client) Timer(name string, value float64, tags []string, rate float64) error {
-	stat := fmt.Sprintf("%f|ms", value)
-	return c.send(name, stat, tags, rate)
+	var b bytes.Buffer
+	if err := c.start(&b, name); err != nil {
+		return err
+	}
+	if _, err := b.WriteString(strconv.FormatFloat(value, 'f', -1, 64)); err != nil {
+		return err
+	}
+	return c.send(&b, TimerSpec, tags, rate)
 }
 
 // Set counts the number of unique elements in a group
 func (c *Client) Set(name string, value string, tags []string, rate float64) error {
-	stat := fmt.Sprintf("%s|s", value)
-	return c.send(name, stat, tags, rate)
+	var b bytes.Buffer
+	if err := c.start(&b, name); err != nil {
+		return err
+	}
+	if _, err := b.WriteString(value); err != nil {
+		return err
+	}
+	return c.send(&b, SetSpec, tags, rate)
 }
