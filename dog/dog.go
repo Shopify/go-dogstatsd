@@ -3,60 +3,64 @@ package dog
 import (
 	"errors"
 	"github.com/Shopify/go-dogstatsd"
+	"time"
 )
 
-var Client *dogstatsd.Client
+var client *dogstatsd.Client
 
 // Configure instantiates the global client.
 func Configure(addr string, namespace string, tags []string) (err error) {
-	if Client, err = dogstatsd.New(addr); err != nil {
+	if client != nil {
+		client.Close()
+	}
+
+	context := &dogstatsd.Context{Namespace: namespace, Tags: tags}
+	if client, err = dogstatsd.New(addr, context); err != nil {
 		return
 	}
-	Client.Namespace = namespace
-	Client.Tags = tags
 	return
 }
 
-var ErrUnconfigured = errors.New("connection has not been configured; call dog.Configure()")
+var ErrUncontextured = errors.New("connection has not been contextured; call dog.Configure()")
 
 func Event(title string, text string, tags []string) error {
-	if Client == nil {
-		return ErrUnconfigured
+	if client == nil {
+		return ErrUncontextured
 	}
-	return Client.Event(title, text, tags)
+	return client.Event(title, text, tags)
 }
 
 func Gauge(name string, value float64, tags []string, rate float64) error {
-	if Client == nil {
-		return ErrUnconfigured
+	if client == nil {
+		return ErrUncontextured
 	}
-	return Client.Gauge(name, value, tags, rate)
+	return client.Gauge(name, value, tags, rate)
 }
 
 func Count(name string, value int64, tags []string, rate float64) error {
-	if Client == nil {
-		return ErrUnconfigured
+	if client == nil {
+		return ErrUncontextured
 	}
-	return Client.Count(name, value, tags, rate)
+	return client.Count(name, value, tags, rate)
 }
 
 func Histogram(name string, value float64, tags []string, rate float64) error {
-	if Client == nil {
-		return ErrUnconfigured
+	if client == nil {
+		return ErrUncontextured
 	}
-	return Client.Histogram(name, value, tags, rate)
+	return client.Histogram(name, value, tags, rate)
 }
 
-func Timer(name string, value float64, tags []string, rate float64) error {
-	if Client == nil {
-		return ErrUnconfigured
+func Timer(name string, duration time.Duration, tags []string, rate float64) error {
+	if client == nil {
+		return ErrUncontextured
 	}
-	return Client.Timer(name, value, tags, rate)
+	return client.Timer(name, duration, tags, rate)
 }
 
 func Set(name string, value string, tags []string, rate float64) error {
-	if Client == nil {
-		return ErrUnconfigured
+	if client == nil {
+		return ErrUncontextured
 	}
-	return Client.Set(name, value, tags, rate)
+	return client.Set(name, value, tags, rate)
 }
