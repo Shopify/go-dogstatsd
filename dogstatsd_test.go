@@ -3,6 +3,7 @@
 package dogstatsd
 
 import (
+	"log"
 	"net"
 	"reflect"
 	"testing"
@@ -45,7 +46,7 @@ func TestClient(t *testing.T) {
 	defer mainClient.Close()
 
 	for _, tt := range dogstatsdTests {
-		client := Clone(mainClient, &Config{Namespace: tt.GlobalNamespace, Tags: tt.GlobalTags})
+		client := Clone(mainClient, &Context{Namespace: tt.GlobalNamespace, Tags: tt.GlobalTags})
 
 		method := reflect.ValueOf(client).MethodByName(tt.Method)
 		e := method.Call([]reflect.Value{
@@ -70,36 +71,36 @@ func TestCloneConcurrently(t *testing.T) {
 	server := newServer(t, addr)
 	defer server.Close()
 
-	config := &Config{Tags: []string{"global"}}
-	client, err := New(addr, config)
+	context := &Context{Tags: []string{"global"}}
+	client, err := New(addr, context)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	go func() {
-		configA := config.Clone()
-		configA.Namespace = "a."
-		configA.Tags = append(configA.Tags, "a")
+		contextA := context.Clone()
+		contextA.Namespace = "a."
+		contextA.Tags = append(contextA.Tags, "a")
 
-		clonedClient := Clone(client, configA)
+		clonedClient := Clone(client, contextA)
 		clonedClient.Count("a", 1, nil, 1.0)
 	}()
 
 	go func() {
-		configB := config.Clone()
-		configB.Namespace = "b."
-		configB.Tags = append(configB.Tags, "b")
+		contextB := context.Clone()
+		contextB.Namespace = "b."
+		contextB.Tags = append(contextB.Tags, "b")
 
 		go func() {
-			configC := configB.Clone()
-			configC.Namespace = "c."
-			configC.Tags = append(configC.Tags, "c")
+			contextC := contextB.Clone()
+			contextC.Namespace = "c."
+			contextC.Tags = append(contextC.Tags, "c")
 
-			clonedClient := Clone(client, configC)
+			clonedClient := Clone(client, contextC)
 			clonedClient.Count("c", 1, nil, 1.0)
 		}()
 
-		clonedClient := Clone(client, configB)
+		clonedClient := Clone(client, contextB)
 		clonedClient.Count("b", 1, nil, 1.0)
 	}()
 
@@ -172,4 +173,63 @@ func newServer(t *testing.T, addr string) *net.UDPConn {
 		t.Fatal(err)
 	}
 	return server
+}
+
+// This example shows the basic usage of the library.
+func Example() {
+	// Create the client with a given context.
+	c, err := New("127.0.0.1:8125", &Context{
+		Namespace: "flubber.",                  // Prefix for every metric name
+		Tags:      []string{"zone:us-east-1a"}, // Apended to every metric
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close()
+
+	// Use the client to send metrics of different kinds.
+	err = c.Timer("request.duration", 2*time.Second, nil, 1)
+	err = c.Count("mysql.queries", 1, nil, 0.01)
+	err = c.Set("unique_logins", "UUIDv4", nil, 1.0)
+	err = c.Gauge("queue_size", 213, nil, 1)
+	err = c.Histogram("message_size", 345, nil, 0.01)
+	err = c.Event("Final event", "This is the final event we are sending", []string{"final:true"})
+}
+
+// This example shows how to use clone to create multiplke clients
+// with different contexts, while reusing the same UDP socket.
+// This allows you to construct a tree of clients for different contexts,
+// all reusing the same connection. The connection will only be closed
+// by calling Close on the root client that was created using New; the
+// connection will be left alone for any other client that gets closed.
+// By using Context Clone to cerate a new context from an existing one,
+// it is thread-safe to use.
+func ExampleClone() {
+	context := &Context{Tags: []string{"global"}}
+
+	c1, err := New("127.0.0.1:8125", context)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c1.Close()
+
+	go func() {
+		newContext := context.Clone()
+		newContext.Tags = append(newContext.Tags, "context:a")
+		c2 := Clone(c1, newContext)
+		defer c2.Close()
+
+		err = c2.Count("mysql.queries", 1, []string{"call:1"}, 0.01) // Tags: global,context:a,call:1
+	}()
+
+	go func() {
+		newContext := context.Clone()
+		newContext.Tags = append(newContext.Tags, "context:b")
+		c3 := Clone(c1, newContext)
+		defer c3.Close()
+
+		err = c3.Count("mysql.queries", 1, []string{"call:2"}, 0.01) // Tags: global,context:b,call:2
+	}()
+
+	err = c1.Count("mysql.queries", 1, []string{"call:master"}, 0.01) // Tags: global,call:master
 }

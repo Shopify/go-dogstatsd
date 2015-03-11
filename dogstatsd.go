@@ -4,20 +4,6 @@
 Package dogstatsd provides a Go DogStatsD client. DogStatsD extends StatsD - adding tags and
 histograms. Refer to http://docs.datadoghq.com/guides/dogstatsd/ for information about DogStatsD.
 
-Example Usage:
-		// Create the client
-		c, err := dogstatsd.New("127.0.0.1:8125")
-		defer c.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
-		// Prefix every metric with the app name
-		c.SetNamespace("flubber.")
-		// Send the EC2 availability zone as a tag with every metric
-		c.SetTags([]string{"us-east-1a"})
-
-		err = c.Gauge("request.duration", 1.2, nil, 1)
-
 dogstatsd is based on go-statsd-client.
 */
 package dogstatsd
@@ -44,14 +30,15 @@ var (
 	comma           = []byte{','}
 )
 
-type Config struct {
+type Context struct {
 	l         sync.Mutex
-	Namespace string
-	Tags      []string
+	Namespace string   // Prefix to use for all metric names. Should end with a dot if not empty
+	Tags      []string // The list of tags to append to every metric call.
 }
 
-func (c *Config) Clone() *Config {
-	cc := &Config{}
+// Clone creates a copy of the Context object in a thread-safe way, and returns it.
+func (c *Context) Clone() *Context {
+	cc := &Context{}
 
 	c.l.Lock()
 	defer c.l.Unlock()
@@ -66,39 +53,48 @@ func (c *Config) Clone() *Config {
 	return cc
 }
 
-// Client holds onto a connection and the other context necessary for every stasd packet.
+// Client holds onto a connection and the context necessary for every stasd packet.
 type Client struct {
-	conn   net.Conn
-	config *Config
+	conn    net.Conn
+	context *Context
+	cloned  bool
 }
 
 // New returns a pointer to a new Client and an error.
-// addr must have the format "hostname:port"
-func New(addr string, config *Config) (*Client, error) {
+// addr must have the format "hostname:port". The context object is cloned,
+// so changing it after it has been sent to this function will have no effect
+// on the client.
+func New(addr string, context *Context) (*Client, error) {
 	conn, err := net.Dial("udp", addr)
 	if err != nil {
 		return nil, err
 	}
 
-	if config == nil {
-		config = &Config{}
+	if context == nil {
+		context = &Context{}
 	}
 
-	client := &Client{conn: conn, config: config.Clone()}
+	client := &Client{conn: conn, context: context.Clone()}
 	return client, nil
 }
 
-// Close closes the connection to the DogStatsD agent
-func (c *Client) Close() error {
-	return c.conn.Close()
-}
-
-func Clone(current *Client, newConfig *Config) *Client {
-	if newConfig == nil {
-		newConfig = current.config
+// Creates a new Client instance that reuses the connection of the
+// original Client, but with a different Context.
+func Clone(current *Client, newContext *Context) *Client {
+	if newContext == nil {
+		newContext = current.context
 	}
 
-	return &Client{conn: current.conn, config: newConfig}
+	return &Client{conn: current.conn, context: newContext, cloned: true}
+}
+
+// Close closes the connection to the DogStatsD agent, unless this
+// client was cloned from another Client.
+func (c *Client) Close() error {
+	if c.cloned {
+		return nil
+	}
+	return c.conn.Close()
 }
 
 // send handles sampling and sends the message over UDP. It also adds global namespace prefixes and tags.
@@ -118,7 +114,7 @@ func (c *Client) send(b *bytes.Buffer, spec []byte, tags []string, rate float64)
 		}
 	}
 
-	tags = append(c.config.Tags, tags...)
+	tags = append(c.context.Tags, tags...)
 	if len(tags) > 0 {
 		if _, err := b.Write(tagSeparator); err != nil {
 			return err
@@ -145,7 +141,7 @@ func (c *Client) Event(title string, text string, tags []string) error {
 	var b bytes.Buffer
 
 	fmt.Fprintf(&b, "_e{%d,%d}:%s|%s", len(title), len(text), title, text)
-	tags = append(c.config.Tags, tags...)
+	tags = append(c.context.Tags, tags...)
 	format := "|#%s"
 	for _, t := range tags {
 		fmt.Fprintf(&b, format, t)
@@ -158,7 +154,7 @@ func (c *Client) Event(title string, text string, tags []string) error {
 
 func (c *Client) start(b *bytes.Buffer, name string) error {
 	var err error
-	if _, err = b.WriteString(c.config.Namespace); err != nil {
+	if _, err = b.WriteString(c.context.Namespace); err != nil {
 		return err
 	}
 	if _, err = b.WriteString(name); err != nil {
