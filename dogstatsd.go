@@ -28,6 +28,7 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -43,38 +44,61 @@ var (
 	comma           = []byte{','}
 )
 
+type Config struct {
+	l         sync.Mutex
+	Namespace string
+	Tags      []string
+}
+
+func (c *Config) Clone() *Config {
+	cc := &Config{}
+
+	c.l.Lock()
+	defer c.l.Unlock()
+
+	cc.l.Lock()
+	defer cc.l.Unlock()
+
+	cc.Namespace = c.Namespace
+	cc.Tags = make([]string, len(c.Tags))
+	copy(cc.Tags, c.Tags)
+
+	return cc
+}
+
 // Client holds onto a connection and the other context necessary for every stasd packet.
 type Client struct {
-	conn net.Conn
-
-	namespace string
-	tags      []string
+	conn   net.Conn
+	config *Config
 }
 
 // New returns a pointer to a new Client and an error.
 // addr must have the format "hostname:port"
-func New(addr string) (*Client, error) {
+func New(addr string, config *Config) (*Client, error) {
 	conn, err := net.Dial("udp", addr)
 	if err != nil {
 		return nil, err
 	}
-	client := &Client{conn: conn}
+
+	if config == nil {
+		config = &Config{}
+	}
+
+	client := &Client{conn: conn, config: config.Clone()}
 	return client, nil
-}
-
-// SetNamespace sets a prefix for all metric names. Should normally end with a .
-func (c *Client) SetNamespace(ns string) {
-	c.namespace = ns
-}
-
-// SetTags sets tags that will be appended to every metric.
-func (c *Client) SetTags(tags []string) {
-	c.tags = tags
 }
 
 // Close closes the connection to the DogStatsD agent
 func (c *Client) Close() error {
 	return c.conn.Close()
+}
+
+func Clone(current *Client, newConfig *Config) *Client {
+	if newConfig == nil {
+		newConfig = current.config
+	}
+
+	return &Client{conn: current.conn, config: newConfig}
 }
 
 // send handles sampling and sends the message over UDP. It also adds global namespace prefixes and tags.
@@ -94,7 +118,7 @@ func (c *Client) send(b *bytes.Buffer, spec []byte, tags []string, rate float64)
 		}
 	}
 
-	tags = append(c.tags, tags...)
+	tags = append(c.config.Tags, tags...)
 	if len(tags) > 0 {
 		if _, err := b.Write(tagSeparator); err != nil {
 			return err
@@ -121,7 +145,7 @@ func (c *Client) Event(title string, text string, tags []string) error {
 	var b bytes.Buffer
 
 	fmt.Fprintf(&b, "_e{%d,%d}:%s|%s", len(title), len(text), title, text)
-	tags = append(c.tags, tags...)
+	tags = append(c.config.Tags, tags...)
 	format := "|#%s"
 	for _, t := range tags {
 		fmt.Fprintf(&b, format, t)
@@ -134,7 +158,7 @@ func (c *Client) Event(title string, text string, tags []string) error {
 
 func (c *Client) start(b *bytes.Buffer, name string) error {
 	var err error
-	if _, err = b.WriteString(c.namespace); err != nil {
+	if _, err = b.WriteString(c.config.Namespace); err != nil {
 		return err
 	}
 	if _, err = b.WriteString(name); err != nil {
