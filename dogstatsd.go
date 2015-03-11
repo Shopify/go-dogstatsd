@@ -12,9 +12,10 @@ Example Usage:
 			log.Fatal(err)
 		}
 		// Prefix every metric with the app name
-		c.Namespace = "flubber."
+		c.SetNamespace("flubber.")
 		// Send the EC2 availability zone as a tag with every metric
-		append(c.Tags, "us-east-1a")
+		c.SetTags([]string{"us-east-1a"})
+
 		err = c.Gauge("request.duration", 1.2, nil, 1)
 
 dogstatsd is based on go-statsd-client.
@@ -27,6 +28,7 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
+	"time"
 )
 
 var (
@@ -44,10 +46,9 @@ var (
 // Client holds onto a connection and the other context necessary for every stasd packet.
 type Client struct {
 	conn net.Conn
-	// Namespace to prepend to all statsd calls
-	Namespace string
-	// Global tags to be added to every statsd call
-	Tags []string
+
+	namespace string
+	tags      []string
 }
 
 // New returns a pointer to a new Client and an error.
@@ -59,6 +60,16 @@ func New(addr string) (*Client, error) {
 	}
 	client := &Client{conn: conn}
 	return client, nil
+}
+
+// SetNamespace sets a prefix for all metric names. Should normally end with a .
+func (c *Client) SetNamespace(ns string) {
+	c.namespace = ns
+}
+
+// SetTags sets tags that will be appended to every metric.
+func (c *Client) SetTags(tags []string) {
+	c.tags = tags
 }
 
 // Close closes the connection to the DogStatsD agent
@@ -83,7 +94,7 @@ func (c *Client) send(b *bytes.Buffer, spec []byte, tags []string, rate float64)
 		}
 	}
 
-	tags = append(c.Tags, tags...)
+	tags = append(c.tags, tags...)
 	if len(tags) > 0 {
 		if _, err := b.Write(tagSeparator); err != nil {
 			return err
@@ -110,7 +121,7 @@ func (c *Client) Event(title string, text string, tags []string) error {
 	var b bytes.Buffer
 
 	fmt.Fprintf(&b, "_e{%d,%d}:%s|%s", len(title), len(text), title, text)
-	tags = append(c.Tags, tags...)
+	tags = append(c.tags, tags...)
 	format := "|#%s"
 	for _, t := range tags {
 		fmt.Fprintf(&b, format, t)
@@ -123,7 +134,7 @@ func (c *Client) Event(title string, text string, tags []string) error {
 
 func (c *Client) start(b *bytes.Buffer, name string) error {
 	var err error
-	if _, err = b.WriteString(c.Namespace); err != nil {
+	if _, err = b.WriteString(c.namespace); err != nil {
 		return err
 	}
 	if _, err = b.WriteString(name); err != nil {
@@ -172,12 +183,13 @@ func (c *Client) Histogram(name string, value float64, tags []string, rate float
 }
 
 // Timer tracks the statistical distribution of a set of durations
-func (c *Client) Timer(name string, value float64, tags []string, rate float64) error {
+func (c *Client) Timer(name string, duration time.Duration, tags []string, rate float64) error {
 	var b bytes.Buffer
 	if err := c.start(&b, name); err != nil {
 		return err
 	}
-	if _, err := b.WriteString(strconv.FormatFloat(value, 'f', -1, 64)); err != nil {
+	durationInMs := float64(duration) / float64(time.Millisecond)
+	if _, err := b.WriteString(strconv.FormatFloat(durationInMs, 'f', -1, 64)); err != nil {
 		return err
 	}
 	return c.send(&b, timerSpec, tags, rate)
