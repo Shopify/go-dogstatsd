@@ -6,6 +6,7 @@ import (
 	"net"
 	"reflect"
 	"testing"
+	"time"
 )
 
 var dogstatsdTests = []struct {
@@ -27,6 +28,7 @@ var dogstatsdTests = []struct {
 	{"", nil, "Count", "test.count", int64(-1), []string{"tagA"}, 1.0, "test.count:-1|c|#tagA"},
 	{"", nil, "Histogram", "test.histogram", 2.3, []string{"tagA"}, 1.0, "test.histogram:2.3|h|#tagA"},
 	{"", nil, "Set", "test.set", "uuid", []string{"tagA"}, 1.0, "test.set:uuid|s|#tagA"},
+	{"", nil, "Timer", "test.timer", 44876 * time.Microsecond, []string{"tagA"}, 1.0, "test.timer:44.876|ms|#tagA"},
 	{"flubber.", nil, "Set", "test.set", "uuid", []string{"tagA"}, 1.0, "flubber.test.set:uuid|s|#tagA"},
 	{"", []string{"tagC"}, "Set", "test.set", "uuid", []string{"tagA"}, 1.0, "test.set:uuid|s|#tagC,tagA"},
 }
@@ -36,15 +38,15 @@ func TestClient(t *testing.T) {
 	server := newServer(t, addr)
 	defer server.Close()
 
-	client, err := New(addr)
+	mainClient, err := New(addr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer mainClient.Close()
 
 	for _, tt := range dogstatsdTests {
-		client.Namespace = tt.GlobalNamespace
-		client.Tags = tt.GlobalTags
+		client := Clone(mainClient, &Config{Namespace: tt.GlobalNamespace, Tags: tt.GlobalTags})
+
 		method := reflect.ValueOf(client).MethodByName(tt.Method)
 		e := method.Call([]reflect.Value{
 			reflect.ValueOf(tt.Metric),
@@ -61,7 +63,67 @@ func TestClient(t *testing.T) {
 			t.Errorf("Expected: %s. Actual: %s", tt.Expected, message)
 		}
 	}
+}
 
+func TestCloneConcurrently(t *testing.T) {
+	addr := "localhost:1201"
+	server := newServer(t, addr)
+	defer server.Close()
+
+	config := &Config{Tags: []string{"global"}}
+	client, err := New(addr, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		configA := config.Clone()
+		configA.Namespace = "a."
+		configA.Tags = append(configA.Tags, "a")
+
+		clonedClient := Clone(client, configA)
+		clonedClient.Count("a", 1, nil, 1.0)
+	}()
+
+	go func() {
+		configB := config.Clone()
+		configB.Namespace = "b."
+		configB.Tags = append(configB.Tags, "b")
+
+		go func() {
+			configC := configB.Clone()
+			configC.Namespace = "c."
+			configC.Tags = append(configC.Tags, "c")
+
+			clonedClient := Clone(client, configC)
+			clonedClient.Count("c", 1, nil, 1.0)
+		}()
+
+		clonedClient := Clone(client, configB)
+		clonedClient.Count("b", 1, nil, 1.0)
+	}()
+
+	client.Count("master", 1, nil, 1.0)
+
+	messages := make([]string, 0, 4)
+	messages = append(messages, serverRead(t, server))
+	messages = append(messages, serverRead(t, server))
+	messages = append(messages, serverRead(t, server))
+	messages = append(messages, serverRead(t, server))
+
+	assertMessageReceived := func(messages []string, message string) {
+		for _, msg := range messages {
+			if msg == message {
+				return
+			}
+		}
+		t.Errorf("Did not receive message: %s", message)
+	}
+
+	assertMessageReceived(messages, "master:1|c|#global")
+	assertMessageReceived(messages, "a.a:1|c|#global,a")
+	assertMessageReceived(messages, "b.b:1|c|#global,b")
+	assertMessageReceived(messages, "c.c:1|c|#global,b,c")
 }
 
 func TestEvent(t *testing.T) {
@@ -92,7 +154,7 @@ func serverRead(t *testing.T, server *net.UDPConn) string {
 }
 
 func newClient(t *testing.T, addr string) *Client {
-	client, err := New(addr)
+	client, err := New(addr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
